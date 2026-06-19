@@ -1000,6 +1000,9 @@ PRINT_CONFIG_CLASS_DEFINE(
     ((ConfigOptionFloat,               support_ironing_spacing))
     ((ConfigOptionFloat,               xy_hole_compensation))
     ((ConfigOptionFloat,               xy_contour_compensation))
+    ((ConfigOptionBool,                enable_sag_compensation))
+    ((ConfigOptionFloat,               sag_compensation_z))
+    ((ConfigOptionFloat,               sag_compensation_threshold_deg))
     ((ConfigOptionBool,                flush_into_objects))
     // BBS
     ((ConfigOptionBool,                flush_into_infill))

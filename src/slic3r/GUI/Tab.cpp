@@ -2360,6 +2360,9 @@ void TabPrint::build()
         optgroup->append_single_option_line("elefant_foot_compensation", "quality_settings_precision#elephant-foot-compensation");
         optgroup->append_single_option_line("elefant_foot_layers_density", "quality_settings_precision#elephant-foot-compensation-density");
         optgroup->append_single_option_line("elefant_foot_compensation_layers", "quality_settings_precision#elephant-foot-compensation");
+        optgroup->append_single_option_line("enable_sag_compensation");
+        optgroup->append_single_option_line("sag_compensation_z");
+        optgroup->append_single_option_line("sag_compensation_threshold_deg");
         optgroup->append_single_option_line("precise_outer_wall", "quality_settings_precision#precise-wall");
         optgroup->append_single_option_line("precise_z_height", "quality_settings_precision#precise-z-height");
         optgroup->append_single_option_line("hole_to_polyhole", "quality_settings_precision#polyholes");
