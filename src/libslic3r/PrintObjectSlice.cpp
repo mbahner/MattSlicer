@@ -73,11 +73,53 @@ LayerPtrs new_layers(
     return out;
 }
 
+// Parameters for the optional sag-compensation pre-slice mesh modification.
+// Driven by the per-object options enable_sag_compensation / sag_compensation_z /
+// sag_compensation_threshold_deg.
+struct SagCompensationParams
+{
+    bool  enabled       = false;
+    float offset_z      = 0.f;   // constant +Z raise (mm) applied in bed coordinates
+    float cos_threshold = 1.f;   // a downward facet qualifies when normal.z() < -cos_threshold
+    float plate_z       = 0.f;   // world Z of the build plate (object minimum Z)
+    float plate_tol     = 0.f;   // facets within this of plate_z are treated as resting on the bed
+};
+
+// Raise support-contacted downward-facing facets by a constant distance in +Z, to compensate for
+// the first bridged layer sagging into the support top gap. The mesh MUST already be in world/bed
+// coordinates. Facets resting on the build plate (which have no support and do not sag) are excluded.
+// Note: vertices are shared between facets, so a vertex on the boundary between a compensated
+// downward face and an adjacent wall is raised too; this is acceptable for the flat undersides this
+// feature targets, but will locally distort the transition on curved/filleted undersides.
+static void apply_sag_compensation(indexed_triangle_set &its, const SagCompensationParams &sag)
+{
+    if (! sag.enabled || sag.offset_z == 0.f || its.indices.empty())
+        return;
+    const float plate_cutoff = sag.plate_z + sag.plate_tol;
+    std::vector<bool> raise(its.vertices.size(), false);
+    for (const stl_triangle_vertex_indices &face : its.indices) {
+        // Downward-facing past the threshold? (slope from horizontal below threshold)
+        if (its_face_normal(its, face).z() >= -sag.cos_threshold)
+            continue;
+        const stl_vertex &v0 = its.vertices[face[0]];
+        const stl_vertex &v1 = its.vertices[face[1]];
+        const stl_vertex &v2 = its.vertices[face[2]];
+        // Skip facets resting on the build plate.
+        if (v0.z() <= plate_cutoff && v1.z() <= plate_cutoff && v2.z() <= plate_cutoff)
+            continue;
+        raise[face[0]] = raise[face[1]] = raise[face[2]] = true;
+    }
+    for (size_t i = 0; i < its.vertices.size(); ++ i)
+        if (raise[i])
+            its.vertices[i].z() += sag.offset_z;
+}
+
 // Slice single triangle mesh.
 static std::vector<ExPolygons> slice_volume(
     const ModelVolume             &volume,
     const std::vector<float>      &zs,
     const MeshSlicingParamsEx     &params,
+    const SagCompensationParams   &sag,
     const std::function<void()>   &throw_on_cancel_callback)
 {
     std::vector<ExPolygons> layers;
@@ -86,7 +128,14 @@ static std::vector<ExPolygons> slice_volume(
         if (its.indices.size() > 0) {
             MeshSlicingParamsEx params2 { params };
             params2.trafo = params2.trafo * volume.get_matrix();
-            if (params2.trafo.rotation().determinant() < 0.)
+            if (sag.enabled && volume.is_model_part()) {
+                // Bake the world transform into the mesh copy so the constant-Z displacement is
+                // applied in true bed coordinates, then slice with an identity transform.
+                // (fix_left_handed handles the winding flip that the determinant check did below.)
+                its_transform(its, params2.trafo, true);
+                params2.trafo = Transform3d::Identity();
+                apply_sag_compensation(its, sag);
+            } else if (params2.trafo.rotation().determinant() < 0.)
                 its_flip_triangles(its);
             layers = slice_mesh_ex(its, zs, params2, throw_on_cancel_callback);
             throw_on_cancel_callback();
@@ -102,13 +151,14 @@ static std::vector<ExPolygons> slice_volume(
     const std::vector<float>                    &z,
     const std::vector<t_layer_height_range>     &ranges,
     const MeshSlicingParamsEx                   &params,
+    const SagCompensationParams                 &sag,
     const std::function<void()>                 &throw_on_cancel_callback)
 {
     std::vector<ExPolygons> out;
     if (! z.empty() && ! ranges.empty()) {
         if (ranges.size() == 1 && z.front() >= ranges.front().first && z.back() < ranges.front().second) {
             // All layers fit into a single range.
-            out = slice_volume(volume, z, params, throw_on_cancel_callback);
+            out = slice_volume(volume, z, params, sag, throw_on_cancel_callback);
         } else {
             std::vector<float>                     z_filtered;
             std::vector<std::pair<size_t, size_t>> n_filtered;
@@ -124,7 +174,7 @@ static std::vector<ExPolygons> slice_volume(
                     n_filtered.emplace_back(std::make_pair(first, i));
             }
             if (! n_filtered.empty()) {
-                std::vector<ExPolygons> layers = slice_volume(volume, z_filtered, params, throw_on_cancel_callback);
+                std::vector<ExPolygons> layers = slice_volume(volume, z_filtered, params, sag, throw_on_cancel_callback);
                 out.assign(z.size(), ExPolygons());
                 i = 0;
                 for (const std::pair<size_t, size_t> &span : n_filtered)
@@ -186,6 +236,30 @@ static std::vector<VolumeSlices> slice_volumes_inner(
     //const auto   extra_offset  = is_mm_painted ? 0.f : std::max(0.f, float(print_object_config.xy_contour_compensation.value));
     const auto   extra_offset = 0.f;
 
+    // Sag compensation: optionally raise support-contacted downward faces by a constant +Z.
+    SagCompensationParams sag;
+    sag.enabled = print_object_config.enable_sag_compensation.value && print_object_config.sag_compensation_z.value > 0.;
+    if (sag.enabled) {
+        sag.offset_z      = float(print_object_config.sag_compensation_z.value);
+        // Select facets whose slope from horizontal is below the threshold (matches the support
+        // overhang convention): downward normal within threshold degrees of straight down.
+        sag.cos_threshold = float(std::cos(print_object_config.sag_compensation_threshold_deg.value * 0.017453292519943295));
+        sag.plate_tol     = std::max(0.01f, float(print_object_config.layer_height.value));
+        // Build-plate reference = lowest point of the whole object in bed coordinates, so that a
+        // part floating above the bed is not mistaken for one resting on it.
+        bool found = false;
+        for (const ModelVolume *mv : model_volumes)
+            if (mv->is_model_part()) {
+                const Transform3d t = object_trafo * mv->get_matrix();
+                for (const stl_vertex &v : mv->mesh().its.vertices) {
+                    const float z = float((t * v.cast<double>()).z());
+                    sag.plate_z = found ? std::min(sag.plate_z, z) : z;
+                    found = true;
+                }
+            }
+        sag.enabled = found;
+    }
+
     for (const ModelVolume *model_volume : model_volumes)
         if (model_volume_needs_slicing(*model_volume)) {
             MeshSlicingParamsEx params { params_base };
@@ -206,7 +280,7 @@ static std::vector<VolumeSlices> slice_volumes_inner(
                     }
                     out.push_back({
                         model_volume->id(),
-                        slice_volume(*model_volume, zs, params, throw_on_cancel_callback)
+                        slice_volume(*model_volume, zs, params, sag, throw_on_cancel_callback)
                     });
                 }
             } else {
@@ -218,7 +292,7 @@ static std::vector<VolumeSlices> slice_volumes_inner(
                 if (! slicing_ranges.empty())
                     out.push_back({
                         model_volume->id(),
-                        slice_volume(*model_volume, zs, slicing_ranges, params, throw_on_cancel_callback)
+                        slice_volume(*model_volume, zs, slicing_ranges, params, sag, throw_on_cancel_callback)
                     });
             }
             if (! out.empty() && out.back().slices.empty())
@@ -1559,7 +1633,8 @@ std::vector<Polygons> PrintObject::slice_support_volumes(const ModelVolumeType m
         params.trafo = this->trafo_centered();
         for (; it_volume != it_volume_end; ++ it_volume)
             if ((*it_volume)->type() == model_volume_type) {
-                std::vector<ExPolygons> slices2 = slice_volume(*(*it_volume), zs, params, throw_on_cancel_callback);
+                // Support enforcer/blocker volumes are never sag-compensated.
+                std::vector<ExPolygons> slices2 = slice_volume(*(*it_volume), zs, params, SagCompensationParams{}, throw_on_cancel_callback);
                 if (slices.empty()) {
                     slices.reserve(slices2.size());
                     for (ExPolygons &src : slices2)

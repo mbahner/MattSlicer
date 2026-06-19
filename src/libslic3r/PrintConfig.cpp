@@ -6990,6 +6990,32 @@ void PrintConfigDef::init_fff_params()
     def->mode = comAdvanced;
     def->set_default_value(new ConfigOptionFloat(0));
 
+    def = this->add("enable_sag_compensation", coBool);
+    def->label = L("Sag compensation");
+    def->category = L("Quality");
+    def->tooltip = L("Raise downward-facing surfaces that are printed on support material by a constant distance in Z, to compensate for the first bridged layer sagging into the support top gap. Faces resting on the build plate are not affected.");
+    def->mode = comAdvanced;
+    def->set_default_value(new ConfigOptionBool(false));
+
+    def = this->add("sag_compensation_z", coFloat);
+    def->label = L("Sag compensation height");
+    def->category = L("Quality");
+    def->tooltip = L("The constant distance in Z by which support-contacted downward-facing surfaces are raised when sag compensation is enabled. Set this to the measured droop of the bridged surface.");
+    def->sidetext = L("mm");	// millimeters, CIS languages need translation
+    def->min = 0;
+    def->mode = comAdvanced;
+    def->set_default_value(new ConfigOptionFloat(0.2));
+
+    def = this->add("sag_compensation_threshold_deg", coFloat);
+    def->label = L("Sag compensation overhang threshold");
+    def->category = L("Quality");
+    def->tooltip = L("Only downward-facing surfaces whose slope from horizontal is below this angle are raised by sag compensation, i.e. the near-horizontal overhangs that print on support. Set this to the same value as your support threshold angle so the same faces that get support are the ones compensated.");
+    def->sidetext = L("°");
+    def->min = 0;
+    def->max = 90;
+    def->mode = comAdvanced;
+    def->set_default_value(new ConfigOptionFloat(30));
+
     def = this->add("hole_to_polyhole", coBool);
     def->label = L("Convert holes to polyholes");
     def->category = L("Quality");
