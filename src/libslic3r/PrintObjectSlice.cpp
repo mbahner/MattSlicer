@@ -83,6 +83,8 @@ struct SagCompensationParams
     float cos_threshold = 1.f;   // a downward facet qualifies when normal.z() < -cos_threshold
     float plate_z       = 0.f;   // world Z of the build plate (object minimum Z)
     float plate_tol     = 0.f;   // facets within this of plate_z are treated as resting on the bed
+    bool  has_raft      = false; // when a raft is present the bottom face is bridged onto the raft
+                                 // top and sags, so the build-plate exclusion is disabled
 };
 
 // Raise support-contacted downward-facing facets by a constant distance in +Z, to compensate for
@@ -104,8 +106,9 @@ static void apply_sag_compensation(indexed_triangle_set &its, const SagCompensat
         const stl_vertex &v0 = its.vertices[face[0]];
         const stl_vertex &v1 = its.vertices[face[1]];
         const stl_vertex &v2 = its.vertices[face[2]];
-        // Skip facets resting on the build plate.
-        if (v0.z() <= plate_cutoff && v1.z() <= plate_cutoff && v2.z() <= plate_cutoff)
+        // Skip facets resting directly on the build plate (no top gap, no sag). With a raft the
+        // bottom face is bridged onto the raft top instead, so it DOES sag and must be compensated.
+        if (! sag.has_raft && v0.z() <= plate_cutoff && v1.z() <= plate_cutoff && v2.z() <= plate_cutoff)
             continue;
         raise[face[0]] = raise[face[1]] = raise[face[2]] = true;
     }
@@ -245,19 +248,25 @@ static std::vector<VolumeSlices> slice_volumes_inner(
         // overhang convention): downward normal within threshold degrees of straight down.
         sag.cos_threshold = float(std::cos(print_object_config.sag_compensation_threshold_deg.value * 0.017453292519943295));
         sag.plate_tol     = std::max(0.01f, float(print_object_config.layer_height.value));
-        // Build-plate reference = lowest point of the whole object in bed coordinates, so that a
-        // part floating above the bed is not mistaken for one resting on it.
-        bool found = false;
-        for (const ModelVolume *mv : model_volumes)
-            if (mv->is_model_part()) {
-                const Transform3d t = object_trafo * mv->get_matrix();
-                for (const stl_vertex &v : mv->mesh().its.vertices) {
-                    const float z = float((t * v.cast<double>()).z());
-                    sag.plate_z = found ? std::min(sag.plate_z, z) : z;
-                    found = true;
+        // With a raft the object's bottom face is bridged onto the raft top (like a support
+        // interface) and sags, so it must be compensated. Without a raft it rests directly on the
+        // bed and must not be. Only when there is no raft do we need the build-plate reference.
+        sag.has_raft      = print_object_config.raft_layers.value > 0;
+        if (! sag.has_raft) {
+            // Build-plate reference = lowest point of the whole object in bed coordinates, so that a
+            // part floating above the bed is not mistaken for one resting on it.
+            bool found = false;
+            for (const ModelVolume *mv : model_volumes)
+                if (mv->is_model_part()) {
+                    const Transform3d t = object_trafo * mv->get_matrix();
+                    for (const stl_vertex &v : mv->mesh().its.vertices) {
+                        const float z = float((t * v.cast<double>()).z());
+                        sag.plate_z = found ? std::min(sag.plate_z, z) : z;
+                        found = true;
+                    }
                 }
-            }
-        sag.enabled = found;
+            sag.enabled = found;
+        }
     }
 
     for (const ModelVolume *model_volume : model_volumes)
